@@ -12,35 +12,28 @@ from math import ceil
 import pickle
 import torch.nn.functional as F
 
-# 파일 경로 - 외장하드 경로로 변경
 WACCM_FILES = glob.glob(r'F:\ionodata\*.nc')
 IONO_FILES = glob.glob(r'F:\ionodata\*.nc')
-IONO_FILE = None  # 사용하지 않음
+IONO_FILE = None
 
-# 모델 저장 경로
 MODEL_SAVE_PATH = r'C:\Users\sunma\.vscode\models\hybrid_model.pth'
 MODEL_200KM_SAVE_PATH = r'C:\Users\sunma\.vscode\models\hybrid_model_200km.pth'
 
-# 고도별 필터링 설정
-ALTITUDE_THRESHOLD = 200  # 200km 이상 고도 필터링 기준
+ALTITUDE_THRESHOLD = 200
 HIGH_ALTITUDE_VARS = [
     'T', 'U', 'V', 'H', 'O', 'O2', 'NO', 'QNO', 'PS', 'Z3', 'QRL', 'QRS', 'TTGW', 'UTGW_TOTAL',
     'PHIM2D', 'OMEGA', 'DTCOND', 'UI', 'VI', 'WI'
-]  # 고도별 변수 (대기 변수와 동일하지만 필요시 조정 가능)
+]
 
-# models 디렉토리 생성
 os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
 
-# WGAN 하이퍼파라미터
 LATENT_DIM = 100
 CRITIC_ITERATIONS = 5
 LAMBDA_GP = 10
 
-# 슬라이딩 윈도우 파라미터
-WINDOW_SIZE = 4  # patch 및 time 슬라이딩 윈도우 크기 (기존 체크포인트와 맞추기 위해 4로 변경)
-STRIDE = 2  # 슬라이딩 윈도우 간격
+WINDOW_SIZE = 4
+STRIDE = 2
 
-# 대기/이온 변수 리스트 정의
 ATMOS_VARS = [
     'T', 'U', 'V', 'H', 'O', 'O2', 'NO', 'QNO', 'PS', 'Z3', 'QRL', 'QRS', 'TTGW', 'UTGW_TOTAL',
     'PHIM2D', 'OMEGA', 'DTCOND', 'UI', 'VI', 'WI'
@@ -51,19 +44,14 @@ IONO_VARS = [
 ]
 
 class CombinedDataset(Dataset):
-    """
-    메모리 효율적으로 patch 인덱스만 저장하고, 실제 patch 데이터는 __getitem__에서 파일에서 직접 읽어옴
-    파일 핸들 잠금 문제를 피하기 위해 파일 객체를 캐싱함.
-    """
     def __init__(self, waccm_files, iono_files=None, use_atmos=True, use_iono=True, use_dims=None, var_filter=None, stride=None, altitude_filter=None):
-        self._file_cache = {}  # 파일 핸들 캐시
-        self.patch_index = []  # (파일, 변수, time, lev, lat, lon, is_atmos) 튜플 리스트
+        self._file_cache = {}
+        self.patch_index = []
         self.use_dims = use_dims
         self.var_filter = var_filter
         self.stride = stride if stride is not None else STRIDE
-        self.altitude_filter = altitude_filter  # 고도 필터링 설정
+        self.altitude_filter = altitude_filter
         self.variable_names = []
-        # patch 인덱스만 생성
         if use_atmos and waccm_files:
             for file in waccm_files:
                 try:

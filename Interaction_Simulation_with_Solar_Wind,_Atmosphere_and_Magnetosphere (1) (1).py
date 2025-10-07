@@ -26,17 +26,21 @@ def print_gpu_memory():
         reserved = torch.cuda.memory_reserved(device) / 1024**3
         print(f"GPU 메모리: 할당됨 {allocated:.2f}GB, 예약됨 {reserved:.2f}GB")
 
-PREDICTION_START_HOURS = 6
-PREDICTION_END_HOURS = 30
-PREDICTION_HOURS = PREDICTION_END_HOURS - PREDICTION_START_HOURS
+# 예측 시간 범위 설정 (6시간부터 18시간까지)
+PREDICTION_START_HOURS = 6   # 예측 시작 시간
+PREDICTION_END_HOURS = 30    # 예측 종료 시간
+PREDICTION_HOURS = PREDICTION_END_HOURS - PREDICTION_START_HOURS  # 총 12시간 예측
 
+# 200km에 해당하는 시뮬레이션 단위 상수 정의
 ALTITUDE_200KM_SIM_UNIT = 4.0
 
+# 시뮬레이션 실행 시간 범위 설정 (06:00 ~ 30:00)
 SIM_START_HOUR = 6
 SIM_END_HOUR = 30
 SIM_START_SECONDS = SIM_START_HOUR * 3600.0
 SIM_END_SECONDS = SIM_END_HOUR * 3600.0
 
+# LSTM + Generator 하이브리드 모델 클래스 정의
 class Generator(nn.Module):
     def __init__(self, latent_dim, output_dim):
         super(Generator, self).__init__()
@@ -52,6 +56,7 @@ class Generator(nn.Module):
             nn.Tanh()
         )
         
+        # 모든 가중치를 float32로 초기화
         self.apply(self._init_weights)
         
     def _init_weights(self, module):
@@ -75,6 +80,7 @@ class LSTM(nn.Module):
         # 출력을 6-18시간 범위로 변경
         self.fc = nn.Linear(hidden_size, input_size * self.sequence_length)
         
+        # 모든 가중치를 float32로 초기화
         self.apply(self._init_weights)
         
     def _init_weights(self, module):
@@ -758,71 +764,168 @@ def induce_B_from_special_particles():
 
 @ti.kernel
 def compute_sph_properties():
-    """모든 입자의 밀도, 압력, 가속도 (압력, 점성, 자기장)를 계산합니다."""
-    # 일반 입자 초기화
+    """최적화된 SPH 계산: 2회 루프로 밀도와 힘을 계산합니다."""
+    # 모든 입자 초기화
     for i in range(num_actual_particles[None]):
         rho[i] = 0.0
         acc[i] = ti.Vector([0.0, 0.0])
         etha_a_dt_field[i] = 0.0
         dB_dt[i] = ti.Vector([0.0, 0.0])
 
-    # 보간 입자 초기화
-    for i in range(30900):  # 보간 입자 수 - 입자 수 3만900개로 조정
+    # GAN 입자 초기화
+    for i in range(30900):
         gan_acc[i] = ti.Vector([0.0, 0.0])
 
-    # 일반 입자들 간의 상호작용
+    # === 루프 1: 밀도 계산 (일반 + GAN 입자 모두 포함) ===
+    # 일반 입자들 간의 밀도 계산
     for i in range(num_actual_particles[None]):
-        # 일반 입자들과의 상호작용
         for j in range(num_actual_particles[None]):
             if i != j:
                 r_vec = pos[i] - pos[j]
                 r = r_vec.norm()
                 h_ij = (h_smooth[i] + h_smooth[j]) / 2.0
                 if r < 2.0 * h_ij:
-                    # 기존 상호작용 코드...
                     density_contribution = mass[j] * W(r, h_ij)
                     rho[i] += density_contribution
 
-        # 보간 입자들과의 상호작용
-        for j in range(30900):  # 보간 입자 수 - 입자 수 3만900개로 조정
+    # 일반 입자와 GAN 입자 간의 밀도 계산
+    for i in range(num_actual_particles[None]):
+        for j in range(30900):
             r_vec = pos[i] - gan_pos[j]
             r = r_vec.norm()
-            h_ij = (h_smooth[i] + 0.2) / 2.0  # 보간 입자의 smoothing length를 0.2로 가정
+            h_ij = (h_smooth[i] + 0.2) / 2.0  # GAN 입자의 smoothing length를 0.2로 가정
             if r < 2.0 * h_ij:
-                # 밀도 기여
-                density_contribution = 0.1 * W(r, h_ij)  # 보간 입자의 질량을 0.1로 가정
+                density_contribution = 0.1 * W(r, h_ij)  # GAN 입자의 질량을 0.1로 가정
                 rho[i] += density_contribution
 
-                # 자기장 상호작용
-                if is_special_particle_type[i] == PARTICLE_TYPE_NORMAL:
-                    B_j_norm_sq = gan_B[j].dot(gan_B[j])
-                    magnetic_force = (gan_B[j].outer_product(gan_B[j]) - 0.5 * B_j_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / mu_0
-                    acc[i] += -0.1 * magnetic_force @ grad_W(r_vec, r, h_ij)
-
-    # 보간 입자들의 상호작용
-    for i in range(30900):  # 보간 입자 수 - 입자 수 3만900개로 조정
-        # 일반 입자들과의 상호작용
-        for j in range(num_actual_particles[None]):
-            r_vec = gan_pos[i] - pos[j]
-            r = r_vec.norm()
-            h_ij = (0.2 + h_smooth[j]) / 2.0
-            if r < 2.0 * h_ij:
-                # 자기장 상호작용
-                B_j_norm_sq = B[j].dot(B[j])
-                magnetic_force = (B[j].outer_product(B[j]) - 0.5 * B_j_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / mu_0
-                gan_acc[i] += -0.1 * magnetic_force @ grad_W(r_vec, r, h_ij)
-
-        # 보간 입자들 간의 상호작용
-        for j in range(6180):
+    # GAN 입자들 간의 밀도 계산
+    for i in range(30900):
+        for j in range(30900):
             if i != j:
                 r_vec = gan_pos[i] - gan_pos[j]
                 r = r_vec.norm()
-                h_ij = 0.2  # 보간 입자의 smoothing length
+                h_ij = 0.2  # GAN 입자의 smoothing length
                 if r < 2.0 * h_ij:
-                    # 자기장 상호작용
-                    B_j_norm_sq = gan_B[j].dot(gan_B[j])
-                    magnetic_force = (gan_B[j].outer_product(gan_B[j]) - 0.5 * B_j_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / mu_0
-                    gan_acc[i] += -0.1 * magnetic_force @ grad_W(r_vec, r, h_ij)
+                    density_contribution = 0.1 * W(r, h_ij)
+                    # GAN 입자의 밀도는 별도로 계산하지 않음 (필요시 추가)
+
+    # === 루프 2: 힘 계산 (대칭성 활용하여 중복 제거) ===
+    # 일반 입자들 간의 힘 계산 (대칭성 활용)
+    for i in range(num_actual_particles[None]):
+        for j in range(i + 1, num_actual_particles[None]):  # i < j만 계산
+            r_vec = pos[i] - pos[j]
+            r = r_vec.norm()
+            h_ij = (h_smooth[i] + h_smooth[j]) / 2.0
+            if r < 2.0 * h_ij:
+                # SPH 힘 계산 (압력, 점성, 자기장)
+                force = compute_sph_force(i, j, r_vec, r, h_ij)
+                acc[i] += force
+                acc[j] -= force  # 대칭성 활용
+
+    # 일반 입자와 GAN 입자 간의 힘 계산 (한 번만 계산)
+    for i in range(num_actual_particles[None]):
+        for j in range(30900):
+            r_vec = pos[i] - gan_pos[j]
+            r = r_vec.norm()
+            h_ij = (h_smooth[i] + 0.2) / 2.0
+            if r < 2.0 * h_ij:
+                # 일반 입자 → GAN 입자 힘
+                force_normal_to_gan = compute_sph_force_normal_to_gan(i, j, r_vec, r, h_ij)
+                acc[i] += force_normal_to_gan
+                gan_acc[j] -= force_normal_to_gan  # 대칭성 활용
+
+    # GAN 입자들 간의 힘 계산 (대칭성 활용)
+    for i in range(30900):
+        for j in range(i + 1, 30900):  # i < j만 계산
+            r_vec = gan_pos[i] - gan_pos[j]
+            r = r_vec.norm()
+            h_ij = 0.2
+            if r < 2.0 * h_ij:
+                # GAN 입자 간 SPH 힘 계산
+                force = compute_sph_force_gan_to_gan(i, j, r_vec, r, h_ij)
+                gan_acc[i] += force
+                gan_acc[j] -= force  # 대칭성 활용
+
+@ti.func
+def compute_sph_force(i: ti.i32, j: ti.i32, r_vec: ti.types.vector(2, ti.f32), r: ti.f32, h_ij: ti.f32) -> ti.types.vector(2, ti.f32):
+    """일반 입자 간 SPH 힘 계산"""
+    # 결과 벡터 초기화
+    result = ti.Vector([0.0, 0.0])
+    
+    # 거리가 너무 작으면 0 반환
+    if r >= 1e-9:
+        # 압력 힘
+        P_i = (gamma - 1.0) * rho[i] * u[i]
+        P_j = (gamma - 1.0) * rho[j] * u[j]
+        pressure_force = -mass[j] * (P_i + P_j) / (2.0 * rho[j]) * grad_W(r_vec, r, h_ij)
+        
+        # 점성 힘
+        v_ij = vel[i] - vel[j]
+        viscosity_force = alpha_visc_p[i] * h_ij * mass[j] * v_ij.dot(grad_W(r_vec, r, h_ij)) / rho[j] * grad_W(r_vec, r, h_ij)
+        
+        # 자기장 힘
+        B_i_norm_sq = B[i].dot(B[i])
+        B_j_norm_sq = B[j].dot(B[j])
+        magnetic_force = -mass[j] * ((B[i].outer_product(B[i]) - 0.5 * B_i_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / rho[i] + 
+                                     (B[j].outer_product(B[j]) - 0.5 * B_j_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / rho[j]) / mu_0 @ grad_W(r_vec, r, h_ij)
+        
+        result = pressure_force + viscosity_force + magnetic_force
+    
+    return result
+
+@ti.func
+def compute_sph_force_normal_to_gan(i: ti.i32, j: ti.i32, r_vec: ti.types.vector(2, ti.f32), r: ti.f32, h_ij: ti.f32) -> ti.types.vector(2, ti.f32):
+    """일반 입자와 GAN 입자 간 SPH 힘 계산"""
+    # 결과 벡터 초기화
+    result = ti.Vector([0.0, 0.0])
+    
+    # 거리가 너무 작으면 0 반환
+    if r >= 1e-9:
+        # 압력 힘
+        P_i = (gamma - 1.0) * rho[i] * u[i]
+        P_j = (gamma - 1.0) * gan_rho[j] * gan_u[j]
+        pressure_force = -0.1 * (P_i + P_j) / (2.0 * gan_rho[j]) * grad_W(r_vec, r, h_ij)
+        
+        # 점성 힘
+        v_ij = vel[i] - gan_vel[j]
+        viscosity_force = alpha_visc_p[i] * h_ij * 0.1 * v_ij.dot(grad_W(r_vec, r, h_ij)) / gan_rho[j] * grad_W(r_vec, r, h_ij)
+        
+        # 자기장 힘
+        B_i_norm_sq = B[i].dot(B[i])
+        B_j_norm_sq = gan_B[j].dot(gan_B[j])
+        magnetic_force = -0.1 * ((B[i].outer_product(B[i]) - 0.5 * B_i_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / rho[i] + 
+                                 (gan_B[j].outer_product(gan_B[j]) - 0.5 * B_j_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / gan_rho[j]) / mu_0 @ grad_W(r_vec, r, h_ij)
+        
+        result = pressure_force + viscosity_force + magnetic_force
+    
+    return result
+
+@ti.func
+def compute_sph_force_gan_to_gan(i: ti.i32, j: ti.i32, r_vec: ti.types.vector(2, ti.f32), r: ti.f32, h_ij: ti.f32) -> ti.types.vector(2, ti.f32):
+    """GAN 입자 간 SPH 힘 계산"""
+    # 결과 벡터 초기화
+    result = ti.Vector([0.0, 0.0])
+    
+    # 거리가 너무 작으면 0 반환
+    if r >= 1e-9:
+        # 압력 힘
+        P_i = (gamma - 1.0) * gan_rho[i] * gan_u[i]
+        P_j = (gamma - 1.0) * gan_rho[j] * gan_u[j]
+        pressure_force = -0.1 * (P_i + P_j) / (2.0 * gan_rho[j]) * grad_W(r_vec, r, h_ij)
+        
+        # 점성 힘
+        v_ij = gan_vel[i] - gan_vel[j]
+        viscosity_force = 1.0 * h_ij * 0.1 * v_ij.dot(grad_W(r_vec, r, h_ij)) / gan_rho[j] * grad_W(r_vec, r, h_ij)
+        
+        # 자기장 힘
+        B_i_norm_sq = gan_B[i].dot(gan_B[i])
+        B_j_norm_sq = gan_B[j].dot(gan_B[j])
+        magnetic_force = -0.1 * ((gan_B[i].outer_product(gan_B[i]) - 0.5 * B_i_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / gan_rho[i] + 
+                                 (gan_B[j].outer_product(gan_B[j]) - 0.5 * B_j_norm_sq * ti.Matrix.identity(ti.f32, dimension)) / gan_rho[j]) / mu_0 @ grad_W(r_vec, r, h_ij)
+        
+        result = pressure_force + viscosity_force + magnetic_force
+    
+    return result
 
 @ti.kernel
 def update_particles(dt: ti.f32, current_initial_placement_min_radius: ti.f32):
@@ -1536,6 +1639,9 @@ def main_simulation_loop(resume_from_checkpoint=False):
         # 전기력 계산
         compute_electric_forces()
         
+        # SPH 상호작용 계산 (최적화된 2회 루프)
+        compute_sph_properties()
+        
         # 입자 위치 업데이트
         update_particle_positions(dt)
         
@@ -2010,10 +2116,11 @@ def init_spmhd_particles():
 
 @ti.kernel
 def compute_electric_forces():
-    """입자들 간의 전기력 계산"""
+    """최적화된 전기력 계산: 대칭성 활용하여 중복 제거"""
+    # 일반 입자와 SPMHD 입자 간의 전기력 계산 (대칭성 활용)
     for i in range(num_actual_particles[None]):
-        if is_special_particle_type[i] == PARTICLE_TYPE_NORMAL:  # 일반 입자 1
-            for j in range(num_actual_particles[None]):
+        if is_special_particle_type[i] == PARTICLE_TYPE_NORMAL:  # 일반 입자
+            for j in range(i + 1, num_actual_particles[None]):  # i < j만 계산
                 if is_special_particle_type[j] == PARTICLE_TYPE_SPMHD:  # SPMHD 입자
                     # 두 입자 사이의 거리 벡터
                     r_vec = pos[j] - pos[i]
@@ -2028,7 +2135,7 @@ def compute_electric_forces():
                         force_direction = r_vec / r_magnitude
                         force = force_direction * force_magnitude
                         
-                        # 가속도 업데이트
+                        # 가속도 업데이트 (대칭성 활용)
                         acc[i] += force / mass[i]
                         acc[j] -= force / mass[j]  # 작용-반작용
 
