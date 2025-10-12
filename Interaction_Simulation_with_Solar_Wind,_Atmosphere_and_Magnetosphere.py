@@ -2180,7 +2180,7 @@ def save_observation_data(sim_time):
                     particle_type = "GAN" if is_gan else "일반"
                     print(f"  - {particle_type} 입자 {actual_id} (ID: {particle_id})")
             else:
-                print("⚠️ 250km 관측점에 감지된 입자가 없습니다!")
+                print(" 250km 관측점에 감지된 입자가 없습니다!")
                 print("가능한 원인: 1) 입자가 250km 근처에 없음, 2) 관측 반경이 부족함")
         
         # 간단한 파일명
@@ -3199,4 +3199,5 @@ if __name__ == "__main__":
     if checkpoint_data:
         resume_simulation_from_checkpoint(checkpoint_data)
     else:
+
         main_simulation_loop(resume_from_checkpoint=False)
